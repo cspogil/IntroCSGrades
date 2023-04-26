@@ -1,0 +1,48 @@
+\documentclass[sigconf]{acmart}
+
+\begin{document}
+
+\newcommand{\h}[1]{\textbf{#1}}
+\newcommand{\ditto}{\multicolumn{1}{c}{"}}
+
+\begin{table*}
+\caption{Summary of participating faculty---their institutions, CS1 course offerings, and number of students.}
+\label{tab:faculty}
+\def\arraystretch{0.667}
+%\vspace{-1ex}
+\begin{tabular}{@{}llllllllllc@{}} \toprule
+\h{Fac} & \h{Type} & \h{Classification}     & \h{Size} & \h{Language} & \h{Phase~1a} & \h{Phase~1b} & \h{Phase~2a} & \h{Phase~3a} & \h{Phase~3b} & \h{Total} \\ \midrule
+1       & Private  & Liberal Arts College   & 1,000    & Python       & Fa16: 22     & Fa17: 19     & Fa18: 20     & Fa19: 20     &              & 81        \\ 
+2       & \ditto   & \ditto                 & \ditto   & \ditto       & Fa17: 46     & Sp18: 44     & Fa18: 33     & Sp19: 33     &              & 156       \\
+3       & Private  & Doctoral/Professional  & 6,000    & Java         & Fa17: 27     & Sp18: 15     & Fa18: 38     & Sp19: 15     & Fa19: 27     & 122       \\
+4       & Public   & Baccalaureate College  & 12,000   & Java         & Fa15: 46     & Sp16: 46     & Fa17: 32     & Sp18: 23     & Fa18: 24     & 171       \\ 
+5       & \ditto   & \ditto                 & \ditto   & \ditto       & Fa16: 23     & Sp17: 23     & Fa17: 23     & Sp18: 23     &              & 92        \\ 
+6       & \ditto   & \ditto                 & \ditto   & \ditto       & Fa16: 23     & Sp17: 47     & Fa17: 64     & Sp18: 44     & Fa18: 46     & 224       \\
+7       & Public   & R2 Doctoral University & 14,000   & Java         & Fa16: 109    & Sp17: 51     & Fa17: 113    & Sp18: 53     &              & 326       \\
+8       & Public   & R2 Doctoral University & 22,000   & Java         &              & Fa18: 48     & Fa19: 56     & Fa21: 51     &              & 155       \\
+9       & Public   & Associate's College    & 27,000   & Java         &              & Sp17: 45     & Fa17: 45     & Sp18: 48     & Fa18: 42     & 180       \\
+10      & Public   & R1 Doctoral University & 36,000   & Java         & Sp17: 124    & Fa17: 70     & Fa18: 97     & Fa19: 198    & Fa21: 201    & 690       \\
+11      & Private  & R1 Doctoral University & 46,000   & Java         & Fa17: 25     & Sp18: 26     & Fa18: 28     & Sp19: 21     &              & 100       \\ \midrule
+12      & Private  & Liberal Arts College   & 1,000    & Python       &              & Fa18: 19     & Fa19: 28     &              &              & 47        \\
+13      & Private  & Liberal Arts College   & 1,000    & Java         &              & Fa18: 32     & Fa19: 16     &              &              & 48        \\
+14      & Private  & Liberal Arts College   & 2,000    & Java         & Fa18: 9      & Sp19: 8      & Fa19: 17     &              &              & 34        \\
+15      & Private  & Liberal Arts College   & 3,000    & Java         &              & Fa18: 62     & Fa19: 22     &              &              & 84        \\
+16      & Private  & M2 Master's University & 3,000    & Python       & Fa17: 17     & Sp18: 33     & Fa18: 30     &              &              & 80        \\
+17      & Public   & Associate's College    & 4,000    & Java         &              & Fa18: 13     & Fa19: 6      &              &              & 19        \\
+18      & Private  & M1 Master's University & 5,000    & Java         &              & Fa18: 15     & Fa19: 22     &              &              & 37        \\
+19      & Public   & Doctoral/Professional  & 5,000    & Java         &              & Sp18: 21     & Sp19: 20     &              &              & 41        \\
+20      & Private  & Doctoral/Professional  & 6,000    & Python       &              & Sp18: 19     & Sp19: 17     &              &              & 36        \\
+21      & Private  & Doctoral/Professional  & 7,000    & Java         &              & Fa16: 18     & Fa17: 21     &              &              & 39        \\
+22      & Private  & Doctoral/Professional  & 7,000    & Python       &              & Sp19: 48     & Fa19: 41     &              &              & 89        \\
+23      & Public   & M1 Master's University & 8,000    & Python       & Fa16: 93     & Sp18: 39     & Fa18: 120    &              &              & 252       \\ 
+24      & \ditto   & \ditto                 & \ditto   & \ditto       & Fa17: 96     & Sp18: 77     & Sp19: 91     &              &              & 264       \\
+25      & Public   & M1 Master's University & 30,000   & Java         &              & Sp17: 25     & Sp18: 24     &              &              & 49        \\ \bottomrule
+\end{tabular}
+\end{table*}
+
+%% Dropped faculty with incomplete race data
+%%
+%26      & Private  & Doctoral/Professional  & 6,000    & Python       & Fa16: 39     & Sp18: 47     & Fa18: 49     & Fa19: 47     &              & 182       \\
+%27      & Private  & Liberal Arts College   & 2,000    & Java         &              & Sp16: 16     & Sp18: 18     &              &              & 34        \\
+
+\end{document}
