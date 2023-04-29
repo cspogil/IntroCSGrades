@@ -1,0 +1,1755 @@
+---
+title: "POGIL data analysis (all multilevel models with race and gender)"
+author: "Sean Raleigh"
+date: "April 17, 2023"
+output:
+    html_notebook:
+        toc: yes
+        toc_float: yes
+---
+
+## Preliminaries
+
+Load packages.
+
+```{r}
+library(tidyverse)
+library(rstan)
+library(tidybayes)
+library(patchwork)
+```
+
+Set Stan options:
+
+```{r}
+options(mc.cores = parallel::detectCores()) # parallel proc
+rstan_options(auto_write = TRUE) # avoid recompilation
+```
+
+
+## Import data
+
+```{r}
+data_raw <- read_csv("data/2023-01-21.csv")
+```
+
+## Wrangle data
+
+Remove unneeded variables.
+
+```{r}
+d <- data_raw %>%
+    select(-filename, -term, -cohort, -course) %>%
+    arrange(faculty)
+d$faculty <- as_factor(d$faculty)
+d
+```
+
+```{r}
+d %>%
+  group_by(faculty) %>%
+  count()
+```
+
+### Duplicate rows
+
+Duplicate rows according to `count` variable to create one row per student. 
+
+```{r}
+d_all <- d %>%
+    uncount(count)
+d_all
+```
+
+Check that there are the correct number of rows:
+
+```{r}
+sum(d$count)
+NROW(d_all)
+```
+
+### Drop missing race data
+
+Some of the race data is missing, so we have to drop those rows.
+
+```{r}
+NROW(d_all)
+d_all <- d_all %>%
+  drop_na()
+NROW(d_all)
+```
+
+### Combine phases
+
+```{r}
+d_all$phase_coll <- d_all$phase %>%
+    fct_collapse("1" = c("1a", "1b"), "2" = "2a", "3" = c("3a", "3b"))
+table(d_all$phase)
+table(d_all$phase_coll)
+```
+
+### Collapse "failing" grades
+
+```{r}
+d_all$grade_coll <- d_all$grade %>%
+    fct_collapse(DFW = c("D", "F", "W"))
+table(d_all$grade)
+table(d_all$grade_coll)
+```
+
+We'll also need this variable as a sequence of numbers:
+
+```{r}
+d_all <- d_all %>%
+    mutate(grade_ord = as.integer(grade_coll))
+table(d_all$grade_ord)
+```
+
+### Collapse race variable
+
+```{r}
+d_all <- d_all %>%
+  mutate(race_coll = ifelse(race == "nonURM", "White or Asian", "Black, Hispanic, or Indigenous"))
+table(d_all$race)
+table(d_all$race_coll)
+```
+
+### Create index variables for phases, faculty, gender, and race
+
+#### Phase
+
+The phase indicator has to be 1 or 2. Phase 1 will always be 1, but in the two different models, the comparison phase is either Phase 2 or Phase 3. Both will need to be labeled with the index 2.
+
+```{r}
+d_all <- d_all %>%
+  mutate(phase_ind = ifelse(phase_coll == 1, 1, 2))
+table(d_all$phase_coll)
+table(d_all$phase_ind)
+```
+
+#### Faculty
+
+Currently, the faculty are numbered as follows:
+
+```{r}
+table(d_all$faculty)
+```
+
+The `faculty` is a factor variable, but we'll also need an integer version. We'll also drop the unused levels (faculty with no race data at all).
+
+```{r}
+table(d_all$faculty)
+d_all$faculty <- fct_drop(d_all$faculty)
+d_all <- d_all %>%
+  mutate(faculty_ind = as.integer(as_factor(faculty)))
+table(d_all$faculty_ind)
+```
+
+#### Gender
+
+```{r}
+levels(as_factor(d_all$gender))
+```
+
+So in the index variable, 1 = "men" and 2 = "women".
+
+```{r}
+d_all <- d_all %>%
+  mutate(gender_ind = as.integer(as_factor(gender)))
+table(d_all$gender)
+table(d_all$gender_ind)
+```
+
+#### Race
+
+```{r}
+levels(as_factor(d_all$race_coll))
+```
+
+So in the index variable, 1 = "White or Asian", 2 = "Black, Hispanic, or Indigenous".
+
+```{r}
+d_all <- d_all %>%
+  mutate(race_ind = as.integer(as_factor(race_coll)))
+table(d_all$race_coll)
+table(d_all$race_ind)
+```
+
+### Interaction terms
+
+#### Phase_gender
+
+The new `phase_gender` variable is indexed as follows:
+
+1. Phase 1, Men
+2. Phase 1, Women
+3. Phase 2/3, Men
+4. Phase 2/3, Women
+
+```{r}
+d_all <- d_all %>%
+  mutate(phase_gender = case_when(phase_ind == 1 & gender_ind == 1 ~ 1,
+                                  phase_ind == 1 & gender_ind == 2 ~ 2,
+                                  phase_ind == 2 & gender_ind == 1 ~ 3,
+                                  phase_ind == 2 & gender_ind == 2 ~ 4))
+table(d_all$phase_ind, d_all$gender)
+table(d_all$phase_gender)
+```
+
+#### Phase_race
+
+The new `phase_race` variable is indexed as follows:
+
+1. Phase 1, White or Asian
+2. Phase 1, Black, Hispanic, or Indigenous
+3. Phase 2/3, White or Asian
+4. Phase 2/3, Black, Hispanic, or Indigenous
+
+```{r}
+d_all <- d_all %>%
+  mutate(phase_race = case_when(phase_ind == 1 & race_ind == 1 ~ 1,
+                                phase_ind == 1 & race_ind == 2 ~ 2,
+                                phase_ind == 2 & race_ind == 1 ~ 3,
+                                phase_ind == 2 & race_ind == 2 ~ 4))
+table(d_all$phase_ind, d_all$race_coll)
+table(d_all$phase_race)
+```
+
+### Complete data set
+
+```{r}
+d_all
+```
+
+
+## Exploratory data analysis
+
+### Gender
+
+```{r}
+ggplot(d_all, aes(x = gender)) +
+    geom_bar()
+```
+
+### Race
+
+```{r}
+ggplot(d_all, aes(x = race)) +
+    geom_bar()
+```
+
+```{r}
+ggplot(d_all, aes(x = race_coll)) +
+    geom_bar()
+```
+
+### Grade distributions
+
+#### All letter grades
+
+All grades given across the entire study:
+
+```{r}
+ggplot(d_all, aes(x = grade)) +
+    geom_bar()
+```
+
+#### Overall grade distributions for each phase
+
+```{r}
+ggplot(d_all, aes(x = grade)) +
+    geom_bar() +
+    facet_grid(phase ~ .)
+```
+
+As proportions within each phase:
+
+```{r}
+d_all %>%
+    group_by(phase, grade) %>%
+    count() %>%
+    group_by(phase) %>%
+    mutate(prop = n/sum(n)) %>%
+    ggplot(aes(x = grade, y = prop)) +
+        geom_bar(stat = "identity") +
+        facet_grid(phase ~ .)
+```
+
+#### Grade distributions by faculty across phases
+
+```{r, fig.width = 8}
+ggplot(d_all, aes(x = grade)) +
+    geom_bar() +
+    facet_grid(phase ~ faculty)
+```
+
+As proportions:
+
+```{r, fig.width = 8}
+d_all %>%
+    group_by(phase, faculty, grade) %>%
+    count() %>%
+    group_by(phase, faculty) %>%
+    mutate(prop = n/sum(n)) %>%
+    ggplot(aes(x = grade, y = prop)) +
+        geom_bar(stat = "identity") +
+        facet_grid(phase ~ faculty)
+```
+
+#### Grade distributions by gender
+
+```{r, fig.width = 8}
+ggplot(d_all, aes(x = grade_coll)) +
+    geom_bar() +
+    facet_grid(phase_coll ~ gender)
+```
+
+As proportions:
+
+```{r, fig.width = 8}
+d_all %>%
+    group_by(phase_coll, gender, grade_coll) %>%
+    count() %>%
+    group_by(phase_coll, gender) %>%
+    mutate(prop = n/sum(n)) %>%
+    ggplot(aes(x = grade_coll, y = prop)) +
+        geom_bar(stat = "identity") +
+        facet_grid(phase_coll ~ gender)
+```
+
+
+Check the numbers:
+
+Phase 1 to Phase 2:
+
+```{r}
+d_all %>%
+    filter(phase_coll == 1 | phase_coll == 2) %>%
+    group_by(grade_coll, gender, phase_coll) %>%
+    count() %>%
+    group_by(phase_coll, gender) %>%
+    mutate(prop = n/sum(n))
+```
+
+```{r}
+d_all %>%
+    filter(phase_coll == 1 | phase_coll == 2) %>%
+    group_by(grade_coll, gender, phase_coll) %>%
+    count() %>%
+    group_by(phase_coll, gender) %>%
+    mutate(prop = n/sum(n)) %>%
+  ggplot(aes(y = prop, x = phase_coll)) +
+    geom_point() +
+    facet_grid(gender ~ grade_coll)
+```
+
+Phase 1 to Phase 3:
+
+```{r}
+d_all %>%
+    filter(phase_coll == 1 | phase_coll == 3) %>%
+    group_by(grade_coll, gender, phase_coll) %>%
+    count() %>%
+    group_by(phase_coll, gender) %>%
+    mutate(prop = n/sum(n))
+```
+
+```{r}
+d_all %>%
+    filter(phase_coll == 1 | phase_coll == 3) %>%
+    group_by(grade_coll, gender, phase_coll) %>%
+    count() %>%
+    group_by(phase_coll, gender) %>%
+    mutate(prop = n/sum(n)) %>%
+  ggplot(aes(y = prop, x = phase_coll)) +
+    geom_point() +
+    facet_grid(gender ~ grade_coll)
+```
+
+#### Grade distributions by race
+
+```{r, fig.width = 8}
+ggplot(d_all, aes(x = grade_coll)) +
+    geom_bar() +
+    facet_grid(phase_coll ~ race_coll)
+```
+
+As proportions:
+
+```{r, fig.width = 8}
+d_all %>%
+    group_by(phase_coll, race_coll, grade_coll) %>%
+    count() %>%
+    group_by(phase_coll, race_coll) %>%
+    mutate(prop = n/sum(n)) %>%
+    ggplot(aes(x = grade_coll, y = prop)) +
+        geom_bar(stat = "identity") +
+        facet_grid(phase_coll ~ race_coll)
+```
+
+Check the numbers:
+
+Phase 1 to Phase 2:
+
+```{r}
+d_all %>%
+    filter(phase_coll == 1 | phase_coll == 2) %>%
+    group_by(grade_coll, race_coll, phase_coll) %>%
+    count() %>%
+    group_by(phase_coll, race_coll) %>%
+    mutate(prop = n/sum(n))
+```
+
+```{r}
+d_all %>%
+    filter(phase_coll == 1 | phase_coll == 2) %>%
+    group_by(grade_coll, race_coll, phase_coll) %>%
+    count() %>%
+    group_by(phase_coll, race_coll) %>%
+    mutate(prop = n/sum(n)) %>%
+  ggplot(aes(y = prop, x = phase_coll)) +
+    geom_point() +
+    facet_grid(race_coll ~ grade_coll)
+```
+
+Phase 1 to Phase 3:
+
+```{r}
+d_all %>%
+    filter(phase_coll == 1 | phase_coll == 3) %>%
+    group_by(grade_coll, race_coll, phase_coll) %>%
+    count() %>%
+    group_by(phase_coll, race_coll) %>%
+    mutate(prop = n/sum(n))
+```
+
+```{r}
+d_all %>%
+    filter(phase_coll == 1 | phase_coll == 3) %>%
+    group_by(grade_coll, race_coll, phase_coll) %>%
+    count() %>%
+    group_by(phase_coll, race_coll) %>%
+    mutate(prop = n/sum(n)) %>%
+  ggplot(aes(y = prop, x = phase_coll)) +
+    geom_point() +
+    facet_grid(race_coll ~ grade_coll)
+```
+
+
+## Filter data for phase analysis
+
+```{r}
+# Phase 1 and Phase 2 data
+d_final_12 <- d_all %>%
+  filter(as.integer(phase_coll) == 1 | as.integer(phase_coll) == 2)
+
+# Only faculty labeled 1-11 have Phase 3 data
+d_final_13 <- d_all %>%
+  filter(as.integer(phase_coll) == 1 | as.integer(phase_coll) == 3) %>%
+  filter(as.integer(faculty) >= 1 & as.integer(faculty) <= 11)
+
+```
+
+Drop unused levels of `phase_coll` and `faculty`:
+
+```{r}
+d_final_12$phase_coll <- fct_drop(d_final_12$phase_coll)
+d_final_13$phase_coll <- fct_drop(d_final_13$phase_coll)
+d_final_12$faculty <- fct_drop(d_final_12$faculty)
+d_final_13$faculty <- fct_drop(d_final_13$faculty)
+```
+
+### Final data sets
+
+```{r}
+d_final_12
+```
+
+```{r}
+str(d_final_12)
+```
+
+```{r}
+d_final_13
+```
+
+```{r}
+str(d_final_13)
+```
+
+### Final summary tables
+
+```{r}
+table(d_all$gender, d_all$race)
+```
+
+
+```{r}
+table(d_final_12$race_coll, d_final_12$gender, d_final_12$phase_ind)
+```
+
+```{r}
+table(d_final_12$race_coll, d_final_12$gender, d_final_12$phase_ind) %>%
+  prop.table(margin = 3)
+```
+
+```{r}
+table(d_final_13$race_coll, d_final_13$gender, d_final_13$phase_ind)
+```
+
+```{r}
+table(d_final_13$race_coll, d_final_13$gender, d_final_13$phase_ind) %>%
+  prop.table(margin = 3)
+```
+
+## Models
+
+The ordinal regression model assumes a continuous latent distribution for the response variable with "cutpoints" that generate ordinal categories. For grades, this makes a lot of sense, as the continuous distribution of points is converted into discrete ordered grades.
+
+Suppose there are $K > 2$ categories in our ordinal response $Y$. (For the grade data, $K = 4$.) Let $c$ be a vector of length $K + 1$ with $c_{0} = -\infty$, $c_{K} = \infty$, and $c_{1} < c_{2} < \dots < c_{K-1}$. Finally, let $\eta$ be a real number. Then for $1 \leq k \leq K$, the ordered logistic distribution is given by
+
+$$
+OrdLog(k \mid \eta, c) = invlogit(\eta - c_{k - 1}) - invlogit(\eta - c_{k})
+$$
+where $invlogit$ is the inverse logit function (sometimes called the *logistic* function):
+
+$$
+invlogit(x) = \frac{e^{x}}{1 + e^{x}}.
+$$
+
+Note that $invlogit(-\infty) = 0$ and $invlogit(\infty) = 1$.
+
+$OrdLog(k \mid \eta, c)$ is the probability (given the model) of the ordinal response variable taking the value $k$: $Pr(Y = k)$. (Although $Y$ consists of ordered categories, these categories are assigned integers for convenience in writing down the model mathematically. The model does *not* assume that the categories are equally spaced.)
+
+This is not the most natural parameterization of the ordinal regression model, but it's the one Stan uses, so we're stuck with it. We can re-express the model other ways that are easier to understand. First, note that the inverse logit function represents the cumulative probability of a logistic distributed random variable $X$; in other words,
+
+$$
+invlogit(x) = Pr(X \leq x)
+$$
+where
+$$
+X \sim Logistic(0, 1).
+$$
+
+Replacing $x$ with $\eta - c_{k-1}$ and using the identity $invlogit(-x) = 1 - invlogit(x)$:
+
+\begin{align*}
+Pr(Y = k)  &=  invlogit(\eta - c_{k - 1}) - invlogit(\eta - c_{k})                 \\
+    &= \left( 1 - invlogit(c_{k - 1} - \eta) \right) - \left( 1 - invlogit(c_{k} - \eta) \right)   \\
+    &= invlogit(c_{k} - \eta) - invlogit(c_{k - 1} - \eta)
+\end{align*}
+
+One can show (either using algebra and the expression above, or thinking about $invlogit$ as a cumulative probability) that
+
+$$
+Pr(Y \leq k) = invlogit(c_{k} - \eta)
+$$
+
+Taking the logit function (log odds) on both sides, we get an equivalent expression representing a linear model predicting the cumulative log odds of the ordinal response, meaning the log odds of being in category $k$ *or lower*.
+
+$$
+logit(Pr(Y \leq k)) = \log\left( \frac{Pr(Y \leq k)}{Pr(Y > k)} \right) = c_{k} - \eta
+$$
+
+Based on the way grades are parameterized, however, lower values of $k$ are actually *better* grades. For example, the event $Y \leq 2$ refers to grades of B or A.
+
+The effect of $\eta$ is as follows: if $\eta > 0$, then the log odds---and, therefore, the probability---of being in category $k$ or lower (meaning higher grades) will be smaller. This shifts probability to higher-numbered categories. In other words, larger values of $\eta$ will correspond to more probability assigned to higher-numbered categories of the response (corresponding to lower grades). Likewise, negative values of $\eta$ will shift more probability onto the lower-numbered categories (higher grades). One important point to make is that $\eta$ does not depend on $k$. The "shift" in log-odds is assumed by the model to be constant across all values of $k$. This is called the "proportional odds" assumption due to the following equation:
+
+$$
+\frac{Pr(Y \leq k)}{Pr(Y > k)} = e^{(c_{k} - \eta)} = e^{c_{k}} e^{\eta}
+$$
+
+In general, predictors in the model will be incorporated into the $\eta$ term. In this data, we have the following parameters coded as index variables (one variable for each group in the data):
+
+* $\alpha_{faculty}$: Each faculty participant has a parameter. These are so called "random effects" and are modeled hierarchically using a normal hyperprior: $\alpha \sim Normal(\bar{\alpha}, \sigma)$. The result will be a partial pooling of the results across faculty.
+* $\beta_{phase}$: Each phase has a parameter. There are two phases. In one model, they are Phase 1 and Phase 2. In the other model, they are Phase 1 and Phase 3.
+* $\gamma_{gender}$: Genders are "men" and "women".
+* $\rho_{race}$: Racial categories are "Black, Hispanic, or Indigenous" and "White or Asian".
+* $\delta_{phase/gender}$: These are interaction terms that model deviations from the main effects for phase and gender. (There are four such terms, one for each combination of phase and gender.)
+* $\zeta_{phase/race}$: These are interaction terms that model deviations from the main effects for phase and race. (There are four such terms, one for each combination of phase and race.)
+
+There are two models we are considering. The first model (Model A) uses
+
+$$
+\eta = \alpha_{faculty} + \beta_{phase}
+$$
+
+This model will measure the average effect between phases and will allow us to summarize inferences about grade changes for individual faculty and for all faculty collectively.
+
+The second model (Model B) will consider all predictors, incorporating race and gender, including interaction terms with phase:
+
+$$
+\eta = \alpha_{faculty} + \beta_{phase} + \gamma_{gender} + \rho_{race} + \delta_{phase/gender} + \zeta_{phase/race}
+$$
+
+Model B will measure differences between gender and race categories. In theory, it should be possible to recover Model A from Model B by marginalizing over gender and race. However, the parameterization of the interaction terms in Model B makes it computationally difficult to perform that marginalization. Therefore, we opt to run both Model A and Model B.
+
+Suppose that $Y_{1}$ is the ordinal response (grades) for Phase 1 and $Y_{j}$ is the ordinal response for either Phase 2 or Phase 3 ($j = 2 \text{ or } 3$). For each cutpoint $c_{k}$:
+
+$$
+\eta = c_{k} - logit(Pr(Y \leq k)).
+$$
+
+In Model A, we then have the following equations (for all faculty):
+
+\begin{align*}
+\beta_{1} &= c_{k} - \alpha_{faculty} - logit(Pr(Y_{1} \leq k)) \\
+\beta_{j} &= c_{k} - \alpha_{faculty} - logit(Pr(Y_{j} \leq k))
+\end{align*}
+
+We can subtract these two equations to obtain
+
+\begin{align*}
+\beta_{1} - \beta_{j} &= logit(Pr(Y_{j} \leq k)) - logit(Pr(Y_{1} \leq k)) \\
+  &= log\left( \frac{Pr(Y_{j} \leq k)}{Pr(Y_{j} > k)} \right) - log\left( \frac{Pr(Y_{1} \leq k)}{Pr(Y_{1} > k)} \right) \\
+    &= log\left( \frac{Pr(Y_{j} \leq k)/Pr(Y_{j} > k)}{Pr(Y_{1} \leq k)/Pr(Y_{1} > k)} \right)
+\end{align*}
+
+Therefore, we can exponentiate the expression on the left to get the odds ratio from Phase 1 to Phase 2/3.
+
+An odds ratio of 1 indicates that the grade distribution does not change from one phase to the next. An odds ratio greater than 1 indicates that grades *improved* from Phase 1 to Phase $j$. An odds ratio less than 1 indicates that grades *decreased* from Phase 1 to Phase $j$. The proportional odds assumption forces this odds ratio to be the same at all grade levels. Although this is rarely a realistic assumption, the model effectively averages over any differences from one grade level to the next to enforce this assumption.
+
+In Model B, we have the following equations for each value of faculty, gender, and race:
+
+\begin{align*}
+\beta_{1} + \delta_{1/gender} + \zeta_{1/race} &= c_{k} - \alpha_{faculty} -
+  \gamma_{gender} - \rho_{race} - logit(Pr(Y_{1} \leq k)) \\
+\beta_{j} + \delta_{j/gender} + \zeta_{j/race} &= c_{k} - \alpha_{faculty} -
+  \gamma_{gender} - \rho_{race} - logit(Pr(Y_{j} \leq k))
+\end{align*}
+
+We can subtract these two equations to obtain
+
+\begin{align*}
+\beta_{1} - \beta_{j} + \delta_{1/gender} - \delta_{j/gender} + \zeta_{1/race} - \zeta_{j/race}
+  &= logit(Pr(Y_{j} \leq k)) - logit(Pr(Y_{1} \leq k)) \\
+  &= log\left( \frac{Pr(Y_{j} \leq k)}{Pr(Y_{j} > k)} \right) - log\left( \frac{Pr(Y_{1} \leq k)}{Pr(Y_{1} > k)} \right) \\
+    &= log\left( \frac{Pr(Y_{j} \leq k)/Pr(Y_{j} > k)}{Pr(Y_{1} \leq k)/Pr(Y_{1} > k)} \right)
+\end{align*}
+
+Just as before, we can exponentiate the expression on the left to get the odds ratio from Phase 1 to Phase 2/3 for but now for any combination of gender and race.
+
+As this is a Bayesian analysis, we must specify priors for all parameters. We choose fairly generic, weakly-informative priors. As they are centered at 0, they will also serve as regularizing priors. (The data is sufficient in this study that they will overwhelm just about any sensible choice of prior.) The priors are as follows:
+
+\begin{align*}
+  \alpha_{faculty}      &\sim Normal(\bar{\alpha}, \sigma)    \\
+  \bar{\alpha}          &\sim Normal(0, 1)                    \\
+  \sigma                &\sim Exponential(1)                  \\
+  \beta_{phase}         &\sim Normal(0, 1)                    \\
+  \gamma_{gender}       &\sim Normal(0, 1)                    \\
+  \rho_{race}           &\sim Normal(0, 1)                    \\
+  \delta_{phase/gender} &\sim Normal(0, 1)                    \\
+  \zeta_{phase/race}    &\sim Normal(0, 1)                    \\
+\end{align*}
+
+The components of the cutpoint vector are each assigned a uniform prior by Stan (which is truncated based on the constraints in the ordering).
+
+### Multilevel models in Stan
+
+#### Model A
+
+```{stan, output.var = "ord_mm_modelA", cache = TRUE}
+data {
+  int<lower=0> N;                     // sample size
+  int<lower=1, upper=2> phase_ind[N]; // two phases
+  int<lower=2> J;                     // number of faculty
+  int<lower=1> faculty_ind[N];        // faculty array
+  int<lower=2> K;                     // number of grade categ.
+  int<lower=1, upper=K> y[N];         // grade codes
+}
+parameters {
+  real alpha_bar;
+  real<lower=0> sigma;
+  real alpha[J];
+  real beta[2];
+  ordered[K - 1] c;
+}
+model {
+  alpha_bar ~ normal(0, 1);
+  sigma ~ exponential(1);
+  alpha ~ normal(alpha_bar, sigma);
+  beta ~ normal(0, 1);
+  for (n in 1:N) {
+    real eta;
+    eta = alpha[faculty_ind[n]] + beta[phase_ind[n]];
+    y[n] ~ ordered_logistic(eta, c);
+  }
+}
+```
+
+##### Phase 1 to Phase 2
+
+The data list:
+
+```{r}
+ord_mm_dataA_12 <- list(
+    N = NROW(d_final_12),              
+    phase_ind = d_final_12$phase_ind,
+    J = nlevels(d_final_12$faculty),  
+    faculty_ind = d_final_12$faculty_ind,
+    K = nlevels(d_final_12$grade_coll), 
+    y = d_final_12$grade_ord
+)
+```
+
+Fit the model:
+
+```{r, cache = TRUE}
+ord_mm_fitA_12 <- sampling(ord_mm_modelA,
+                           data = ord_mm_dataA_12,
+                           iter = 8000,
+                           seed = 11114)
+```
+
+Coefficients of the model:
+
+```{r}
+summary(ord_mm_fitA_12, pars = c("alpha_bar", "sigma", "alpha", "beta"))$summary
+```
+
+##### Phase 1 to Phase 3
+
+The data list:
+
+```{r}
+ord_mm_dataA_13 <- list(
+    N = NROW(d_final_13),              
+    phase_ind = d_final_13$phase_ind,
+    J = nlevels(d_final_13$faculty),  
+    faculty_ind = d_final_13$faculty_ind,
+    K = nlevels(d_final_13$grade_coll), 
+    y = d_final_13$grade_ord
+)
+```
+
+Fit the model:
+
+```{r, cache = TRUE}
+ord_mm_fitA_13 <- sampling(ord_mm_modelA,
+                           data = ord_mm_dataA_13,
+                           seed = 11115)
+```
+
+Coefficients of the model:
+
+```{r}
+summary(ord_mm_fitA_13, pars = c("alpha_bar", "sigma", "alpha", "beta"))$summary
+```
+
+#### Model B
+
+```{stan, output.var = "ord_mm_modelB", cache = TRUE}
+data {
+  int<lower=0> N;                     // sample size
+  int<lower=1, upper=2> phase_ind[N]; // two phases
+  int<lower=2> J;                     // number of faculty
+  int<lower=1> faculty_ind[N];        // faculty array
+  int<lower=1> gender_ind[N];         // gender array
+  int<lower=1> phase_gender[N];       // phase/gender interaction
+  int<lower=1> race_ind[N];           // race array
+  int<lower=1> phase_race[N];         // phase/race interaction
+  int<lower=2> K;                     // number of grade categories
+  int<lower=1, upper=K> y[N];         // grade codes
+}
+parameters {
+  real alpha_bar;
+  real<lower=0> sigma;
+  real alpha[J];
+  real beta[2];
+  real gamma[2];
+  real delta[4];
+  real rho[2];
+  real zeta[4];
+  ordered[K - 1] c;
+}
+model {
+  alpha_bar ~ normal(0, 1);
+  sigma ~ exponential(1);
+  alpha ~ normal(alpha_bar, sigma);
+  beta ~ normal(0, 1);
+  gamma ~ normal(0, 1);
+  delta ~ normal(0, 1);
+  rho ~ normal(0, 1);
+  zeta ~ normal(0, 1);
+  for (n in 1:N) {
+    real eta;
+    eta = alpha[faculty_ind[n]] + beta[phase_ind[n]] + 
+      gamma[gender_ind[n]] + delta[phase_gender[n]] +
+      rho[race_ind[n]] + zeta[phase_race[n]];
+    y[n] ~ ordered_logistic(eta, c);
+  }
+}
+```
+
+##### Phase 1 to Phase 2
+
+The data list:
+
+```{r}
+ord_mm_dataB_12 <- list(
+    N = NROW(d_final_12),              
+    phase_ind = d_final_12$phase_ind,
+    J = nlevels(d_final_12$faculty),  
+    faculty_ind = d_final_12$faculty_ind,
+    gender_ind = d_final_12$gender_ind,
+    phase_gender = d_final_12$phase_gender,
+    race_ind = d_final_12$race_ind,
+    phase_race = d_final_12$phase_race,
+    K = nlevels(d_final_12$grade_coll), 
+    y = d_final_12$grade_ord
+)
+```
+
+Fit the model:
+
+```{r, cache = TRUE}
+ord_mm_fitB_12 <- sampling(ord_mm_modelB,
+                           data = ord_mm_dataB_12,
+                           iter = 8000,
+                           seed = 11116)
+```
+
+Coefficients of the model:
+
+```{r}
+summary(ord_mm_fitB_12, pars = c("alpha_bar", "sigma", "alpha", "beta",
+                                 "gamma", "delta", "rho", "zeta"))$summary
+```
+
+#### Phase 1 to Phase 3
+
+The data list:
+
+```{r}
+ord_mm_dataB_13 <- list(
+    N = NROW(d_final_13),              
+    phase_ind = d_final_13$phase_ind,
+    J = nlevels(d_final_13$faculty),  
+    faculty_ind = d_final_13$faculty_ind,
+    gender_ind = d_final_13$gender_ind,
+    phase_gender = d_final_13$phase_gender,
+    race_ind = d_final_13$race_ind,
+    phase_race = d_final_13$phase_race,
+    K = nlevels(d_final_13$grade_coll), 
+    y = d_final_13$grade_ord
+)
+```
+
+Fit the model:
+
+```{r, cache = TRUE}
+ord_mm_fitB_13 <- sampling(ord_mm_modelB,
+                           data = ord_mm_dataB_13,
+                           seed = 11117)
+```
+
+Coefficients of the model:
+
+```{r}
+summary(ord_mm_fitB_13, pars = c("alpha_bar", "sigma", "alpha", "beta",
+                                 "gamma", "delta", "rho", "zeta"))$summary
+```
+
+
+## Results
+
+### Odds ratios
+
+#### Model A
+
+##### Phase 1 to Phase 2
+
+```{r}
+ord_mm_tidyA_12 <- ord_mm_fitA_12 %>%
+    spread_draws(alpha[..], beta[..], c[..]) %>%
+    mutate(or = exp(beta.1 - beta.2))
+```
+
+```{r}
+ggplot(ord_mm_tidyA_12, aes(x = or)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyA_12$or >= 1)/NROW(ord_mm_tidyA_12)
+```
+
+##### Phase 1 to Phase 3
+
+```{r}
+ord_mm_tidyA_13 <- ord_mm_fitA_13 %>%
+    spread_draws(alpha[..], beta[..], c[..]) %>%
+    mutate(or = exp(beta.1 - beta.2))
+```
+
+```{r}
+ggplot(ord_mm_tidyA_13, aes(x = or)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyA_13$or >= 1)/NROW(ord_mm_tidyA_13)
+```
+
+#### Model B
+
+##### Phase 1 to Phase 2
+
+```{r}
+ord_mm_tidyB_12 <- ord_mm_fitB_12 %>%
+    spread_draws(alpha[..], beta[..], gamma[..], c[..],
+                 delta[..], rho[..], zeta[..]) %>%
+    mutate(or_men_WA = exp(beta.1 - beta.2 + delta.1 - delta.3 + zeta.1 - zeta.3),
+           or_women_WA = exp(beta.1 - beta.2 + delta.2 - delta.4 + zeta.1 - zeta.3),
+           or_men_BHI = exp(beta.1 - beta.2 + delta.1 - delta.3 + zeta.2 - zeta.4),
+           or_women_BHI = exp(beta.1 - beta.2 + delta.2 - delta.4 + zeta.2 - zeta.4))
+```
+
+```{r}
+ggplot(ord_mm_tidyB_12, aes(x = or_men_BHI)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyB_12$or_men_BHI >= 1)/NROW(ord_mm_tidyB_12)
+```
+
+```{r}
+ggplot(ord_mm_tidyB_12, aes(x = or_women_BHI)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyB_12$or_women_BHI >= 1)/NROW(ord_mm_tidyB_12)
+```
+
+```{r}
+ggplot(ord_mm_tidyB_12, aes(x = or_men_WA)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyB_12$or_men_WA >= 1)/NROW(ord_mm_tidyB_12)
+```
+
+```{r}
+ggplot(ord_mm_tidyB_12, aes(x = or_women_WA)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyB_12$or_women_WA >= 1)/NROW(ord_mm_tidyB_12)
+```
+
+##### Phase 1 to Phase 3
+
+```{r}
+ord_mm_tidyB_13 <- ord_mm_fitB_13 %>%
+    spread_draws(alpha[..], beta[..], gamma[..], c[..],
+                 delta[..], rho[..], zeta[..]) %>%
+    mutate(or_men_WA = exp(beta.1 - beta.2 + delta.1 - delta.3 + zeta.1 - zeta.3),
+           or_women_WA = exp(beta.1 - beta.2 + delta.2 - delta.4 + zeta.1 - zeta.3),
+           or_men_BHI = exp(beta.1 - beta.2 + delta.1 - delta.3 + zeta.2 - zeta.4),
+           or_women_BHI = exp(beta.1 - beta.2 + delta.2 - delta.4 + zeta.2 - zeta.4))
+```
+
+```{r}
+ggplot(ord_mm_tidyB_13, aes(x = or_men_BHI)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyB_13$or_men_BHI >= 1)/NROW(ord_mm_tidyB_13)
+```
+
+```{r}
+ggplot(ord_mm_tidyB_13, aes(x = or_women_BHI)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyB_13$or_women_BHI >= 1)/NROW(ord_mm_tidyB_13)
+```
+
+```{r}
+ggplot(ord_mm_tidyB_13, aes(x = or_men_WA)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyB_13$or_men_WA >= 1)/NROW(ord_mm_tidyB_13)
+```
+
+```{r}
+ggplot(ord_mm_tidyB_13, aes(x = or_women_WA)) +
+    geom_histogram() +
+    geom_vline(xintercept = 1, color = "blue")
+```
+
+```{r}
+table(ord_mm_tidyB_13$or_women_WA >= 1)/NROW(ord_mm_tidyB_13)
+```
+
+## Faculty differences for Model A
+
+### Phase 1 to Phase 2
+
+```{r}
+ord_mm_tidyA_12 <- ord_mm_fitA_12 %>%
+    spread_draws(alpha[..], beta[..], c[..]) %>%
+    mutate(or = exp(beta.1 - beta.2),
+           A1_1 = 1 - plogis(alpha.1 + beta.1 - c.1),
+           A2_1 = 1 - plogis(alpha.2 + beta.1 - c.1),
+           A3_1 = 1 - plogis(alpha.3 + beta.1 - c.1),
+           A4_1 = 1 - plogis(alpha.4 + beta.1 - c.1),
+           A5_1 = 1 - plogis(alpha.5 + beta.1 - c.1),
+           A6_1 = 1 - plogis(alpha.6 + beta.1 - c.1),
+           A7_1 = 1 - plogis(alpha.7 + beta.1 - c.1),
+           A8_1 = 1 - plogis(alpha.8 + beta.1 - c.1),
+           A9_1 = 1 - plogis(alpha.9 + beta.1 - c.1),
+           A10_1 = 1 - plogis(alpha.10 + beta.1 - c.1),
+           A11_1 = 1 - plogis(alpha.11 + beta.1 - c.1),
+           A12_1 = 1 - plogis(alpha.12 + beta.1 - c.1),
+           A13_1 = 1 - plogis(alpha.13 + beta.1 - c.1),
+           A14_1 = 1 - plogis(alpha.14 + beta.1 - c.1),
+           A15_1 = 1 - plogis(alpha.15 + beta.1 - c.1),
+           A16_1 = 1 - plogis(alpha.16 + beta.1 - c.1),
+           A17_1 = 1 - plogis(alpha.17 + beta.1 - c.1),
+           A18_1 = 1 - plogis(alpha.18 + beta.1 - c.1),
+           A19_1 = 1 - plogis(alpha.19 + beta.1 - c.1),
+           A20_1 = 1 - plogis(alpha.20 + beta.1 - c.1),
+           A21_1 = 1 - plogis(alpha.21 + beta.1 - c.1),
+           A22_1 = 1 - plogis(alpha.22 + beta.1 - c.1),
+           A23_1 = 1 - plogis(alpha.23 + beta.1 - c.1),
+           A24_1 = 1 - plogis(alpha.24 + beta.1 - c.1),
+           A25_1 = 1 - plogis(alpha.25 + beta.1 - c.1),
+           A1_2 = 1 - plogis(alpha.1 + beta.2 - c.1),
+           A2_2 = 1 - plogis(alpha.2 + beta.2 - c.1),
+           A3_2 = 1 - plogis(alpha.3 + beta.2 - c.1),
+           A4_2 = 1 - plogis(alpha.4 + beta.2 - c.1),
+           A5_2 = 1 - plogis(alpha.5 + beta.2 - c.1),
+           A6_2 = 1 - plogis(alpha.6 + beta.2 - c.1),
+           A7_2 = 1 - plogis(alpha.7 + beta.2 - c.1),
+           A8_2 = 1 - plogis(alpha.8 + beta.2 - c.1),
+           A9_2 = 1 - plogis(alpha.9 + beta.2 - c.1),
+           A10_2 = 1 - plogis(alpha.10 + beta.2 - c.1),
+           A11_2 = 1 - plogis(alpha.11 + beta.2 - c.1),
+           A12_2 = 1 - plogis(alpha.12 + beta.2 - c.1),
+           A13_2 = 1 - plogis(alpha.13 + beta.2 - c.1),
+           A14_2 = 1 - plogis(alpha.14 + beta.2 - c.1),
+           A15_2 = 1 - plogis(alpha.15 + beta.2 - c.1),
+           A16_2 = 1 - plogis(alpha.16 + beta.2 - c.1),
+           A17_2 = 1 - plogis(alpha.17 + beta.2 - c.1),
+           A18_2 = 1 - plogis(alpha.18 + beta.2 - c.1),
+           A19_2 = 1 - plogis(alpha.19 + beta.2 - c.1),
+           A20_2 = 1 - plogis(alpha.20 + beta.2 - c.1),
+           A21_2 = 1 - plogis(alpha.21 + beta.2 - c.1),
+           A22_2 = 1 - plogis(alpha.22 + beta.2 - c.1),
+           A23_2 = 1 - plogis(alpha.23 + beta.2 - c.1),
+           A24_2 = 1 - plogis(alpha.24 + beta.2 - c.1),
+           A25_2 = 1 - plogis(alpha.25 + beta.2 - c.1),
+           B1_1 = plogis(alpha.1 + beta.1 - c.1) - plogis(alpha.1 + beta.1 - c.2),
+           B2_1 = plogis(alpha.2 + beta.1 - c.1) - plogis(alpha.2 + beta.1 - c.2),
+           B3_1 = plogis(alpha.3 + beta.1 - c.1) - plogis(alpha.3 + beta.1 - c.2),
+           B4_1 = plogis(alpha.4 + beta.1 - c.1) - plogis(alpha.4 + beta.1 - c.2),
+           B5_1 = plogis(alpha.5 + beta.1 - c.1) - plogis(alpha.5 + beta.1 - c.2),
+           B6_1 = plogis(alpha.6 + beta.1 - c.1) - plogis(alpha.6 + beta.1 - c.2),
+           B7_1 = plogis(alpha.7 + beta.1 - c.1) - plogis(alpha.7 + beta.1 - c.2),
+           B8_1 = plogis(alpha.8 + beta.1 - c.1) - plogis(alpha.8 + beta.1 - c.2),
+           B9_1 = plogis(alpha.9 + beta.1 - c.1) - plogis(alpha.9 + beta.1 - c.2),
+           B10_1 = plogis(alpha.10 + beta.1 - c.1) - plogis(alpha.10 + beta.1 - c.2),
+           B11_1 = plogis(alpha.11 + beta.1 - c.1) - plogis(alpha.11 + beta.1 - c.2),
+           B12_1 = plogis(alpha.12 + beta.1 - c.1) - plogis(alpha.12 + beta.1 - c.2),
+           B13_1 = plogis(alpha.13 + beta.1 - c.1) - plogis(alpha.13 + beta.1 - c.2),
+           B14_1 = plogis(alpha.14 + beta.1 - c.1) - plogis(alpha.14 + beta.1 - c.2),
+           B15_1 = plogis(alpha.15 + beta.1 - c.1) - plogis(alpha.15 + beta.1 - c.2),
+           B16_1 = plogis(alpha.16 + beta.1 - c.1) - plogis(alpha.16 + beta.1 - c.2),
+           B17_1 = plogis(alpha.17 + beta.1 - c.1) - plogis(alpha.17 + beta.1 - c.2),
+           B18_1 = plogis(alpha.18 + beta.1 - c.1) - plogis(alpha.18 + beta.1 - c.2),
+           B19_1 = plogis(alpha.19 + beta.1 - c.1) - plogis(alpha.19 + beta.1 - c.2),
+           B20_1 = plogis(alpha.20 + beta.1 - c.1) - plogis(alpha.20 + beta.1 - c.2),
+           B21_1 = plogis(alpha.21 + beta.1 - c.1) - plogis(alpha.21 + beta.1 - c.2),
+           B22_1 = plogis(alpha.22 + beta.1 - c.1) - plogis(alpha.22 + beta.1 - c.2),
+           B23_1 = plogis(alpha.23 + beta.1 - c.1) - plogis(alpha.23 + beta.1 - c.2),
+           B24_1 = plogis(alpha.24 + beta.1 - c.1) - plogis(alpha.24 + beta.1 - c.2),
+           B25_1 = plogis(alpha.25 + beta.1 - c.1) - plogis(alpha.25 + beta.1 - c.2),
+           B1_2 = plogis(alpha.1 + beta.2 - c.1) - plogis(alpha.1 + beta.2 - c.2),
+           B2_2 = plogis(alpha.2 + beta.2 - c.1) - plogis(alpha.2 + beta.2 - c.2),
+           B3_2 = plogis(alpha.3 + beta.2 - c.1) - plogis(alpha.3 + beta.2 - c.2),
+           B4_2 = plogis(alpha.4 + beta.2 - c.1) - plogis(alpha.4 + beta.2 - c.2),
+           B5_2 = plogis(alpha.5 + beta.2 - c.1) - plogis(alpha.5 + beta.2 - c.2),
+           B6_2 = plogis(alpha.6 + beta.2 - c.1) - plogis(alpha.6 + beta.2 - c.2),
+           B7_2 = plogis(alpha.7 + beta.2 - c.1) - plogis(alpha.7 + beta.2 - c.2),
+           B8_2 = plogis(alpha.8 + beta.2 - c.1) - plogis(alpha.8 + beta.2 - c.2),
+           B9_2 = plogis(alpha.9 + beta.2 - c.1) - plogis(alpha.9 + beta.2 - c.2),
+           B10_2 = plogis(alpha.10 + beta.2 - c.1) - plogis(alpha.10 + beta.2 - c.2),
+           B11_2 = plogis(alpha.11 + beta.2 - c.1) - plogis(alpha.11 + beta.2 - c.2),
+           B12_2 = plogis(alpha.12 + beta.2 - c.1) - plogis(alpha.12 + beta.2 - c.2),
+           B13_2 = plogis(alpha.13 + beta.2 - c.1) - plogis(alpha.13 + beta.2 - c.2),
+           B14_2 = plogis(alpha.14 + beta.2 - c.1) - plogis(alpha.14 + beta.2 - c.2),
+           B15_2 = plogis(alpha.15 + beta.2 - c.1) - plogis(alpha.15 + beta.2 - c.2),
+           B16_2 = plogis(alpha.16 + beta.2 - c.1) - plogis(alpha.16 + beta.2 - c.2),
+           B17_2 = plogis(alpha.17 + beta.2 - c.1) - plogis(alpha.17 + beta.2 - c.2),
+           B18_2 = plogis(alpha.18 + beta.2 - c.1) - plogis(alpha.18 + beta.2 - c.2),
+           B19_2 = plogis(alpha.19 + beta.2 - c.1) - plogis(alpha.19 + beta.2 - c.2),
+           B20_2 = plogis(alpha.20 + beta.2 - c.1) - plogis(alpha.20 + beta.2 - c.2),
+           B21_2 = plogis(alpha.21 + beta.2 - c.1) - plogis(alpha.21 + beta.2 - c.2),
+           B22_2 = plogis(alpha.22 + beta.2 - c.1) - plogis(alpha.22 + beta.2 - c.2),
+           B23_2 = plogis(alpha.23 + beta.2 - c.1) - plogis(alpha.23 + beta.2 - c.2),
+           B24_2 = plogis(alpha.24 + beta.2 - c.1) - plogis(alpha.24 + beta.2 - c.2),
+           B25_2 = plogis(alpha.25 + beta.2 - c.1) - plogis(alpha.25 + beta.2 - c.2),
+           C1_1 = plogis(alpha.1 + beta.1 - c.2) - plogis(alpha.1 + beta.1 - c.3),
+           C2_1 = plogis(alpha.2 + beta.1 - c.2) - plogis(alpha.2 + beta.1 - c.3),
+           C3_1 = plogis(alpha.3 + beta.1 - c.2) - plogis(alpha.3 + beta.1 - c.3),
+           C4_1 = plogis(alpha.4 + beta.1 - c.2) - plogis(alpha.4 + beta.1 - c.3),
+           C5_1 = plogis(alpha.5 + beta.1 - c.2) - plogis(alpha.5 + beta.1 - c.3),
+           C6_1 = plogis(alpha.6 + beta.1 - c.2) - plogis(alpha.6 + beta.1 - c.3),
+           C7_1 = plogis(alpha.7 + beta.1 - c.2) - plogis(alpha.7 + beta.1 - c.3),
+           C8_1 = plogis(alpha.8 + beta.1 - c.2) - plogis(alpha.8 + beta.1 - c.3),
+           C9_1 = plogis(alpha.9 + beta.1 - c.2) - plogis(alpha.9 + beta.1 - c.3),
+           C10_1 = plogis(alpha.10 + beta.1 - c.2) - plogis(alpha.10 + beta.1 - c.3),
+           C11_1 = plogis(alpha.11 + beta.1 - c.2) - plogis(alpha.11 + beta.1 - c.3),
+           C12_1 = plogis(alpha.12 + beta.1 - c.2) - plogis(alpha.12 + beta.1 - c.3),
+           C13_1 = plogis(alpha.13 + beta.1 - c.2) - plogis(alpha.13 + beta.1 - c.3),
+           C14_1 = plogis(alpha.14 + beta.1 - c.2) - plogis(alpha.14 + beta.1 - c.3),
+           C15_1 = plogis(alpha.15 + beta.1 - c.2) - plogis(alpha.15 + beta.1 - c.3),
+           C16_1 = plogis(alpha.16 + beta.1 - c.2) - plogis(alpha.16 + beta.1 - c.3),
+           C17_1 = plogis(alpha.17 + beta.1 - c.2) - plogis(alpha.17 + beta.1 - c.3),
+           C18_1 = plogis(alpha.18 + beta.1 - c.2) - plogis(alpha.18 + beta.1 - c.3),
+           C19_1 = plogis(alpha.19 + beta.1 - c.2) - plogis(alpha.19 + beta.1 - c.3),
+           C20_1 = plogis(alpha.20 + beta.1 - c.2) - plogis(alpha.20 + beta.1 - c.3),
+           C21_1 = plogis(alpha.21 + beta.1 - c.2) - plogis(alpha.21 + beta.1 - c.3),
+           C22_1 = plogis(alpha.22 + beta.1 - c.2) - plogis(alpha.22 + beta.1 - c.3),
+           C23_1 = plogis(alpha.23 + beta.1 - c.2) - plogis(alpha.23 + beta.1 - c.3),
+           C24_1 = plogis(alpha.24 + beta.1 - c.2) - plogis(alpha.24 + beta.1 - c.3),
+           C25_1 = plogis(alpha.25 + beta.1 - c.2) - plogis(alpha.25 + beta.1 - c.3),
+           C1_2 = plogis(alpha.1 + beta.2 - c.2) - plogis(alpha.1 + beta.2 - c.3),
+           C2_2 = plogis(alpha.2 + beta.2 - c.2) - plogis(alpha.2 + beta.2 - c.3),
+           C3_2 = plogis(alpha.3 + beta.2 - c.2) - plogis(alpha.3 + beta.2 - c.3),
+           C4_2 = plogis(alpha.4 + beta.2 - c.2) - plogis(alpha.4 + beta.2 - c.3),
+           C5_2 = plogis(alpha.5 + beta.2 - c.2) - plogis(alpha.5 + beta.2 - c.3),
+           C6_2 = plogis(alpha.6 + beta.2 - c.2) - plogis(alpha.6 + beta.2 - c.3),
+           C7_2 = plogis(alpha.7 + beta.2 - c.2) - plogis(alpha.7 + beta.2 - c.3),
+           C8_2 = plogis(alpha.8 + beta.2 - c.2) - plogis(alpha.8 + beta.2 - c.3),
+           C9_2 = plogis(alpha.9 + beta.2 - c.2) - plogis(alpha.9 + beta.2 - c.3),
+           C10_2 = plogis(alpha.10 + beta.2 - c.2) - plogis(alpha.10 + beta.2 - c.3),
+           C11_2 = plogis(alpha.11 + beta.2 - c.2) - plogis(alpha.11 + beta.2 - c.3),
+           C12_2 = plogis(alpha.12 + beta.2 - c.2) - plogis(alpha.12 + beta.2 - c.3),
+           C13_2 = plogis(alpha.13 + beta.2 - c.2) - plogis(alpha.13 + beta.2 - c.3),
+           C14_2 = plogis(alpha.14 + beta.2 - c.2) - plogis(alpha.14 + beta.2 - c.3),
+           C15_2 = plogis(alpha.15 + beta.2 - c.2) - plogis(alpha.15 + beta.2 - c.3),
+           C16_2 = plogis(alpha.16 + beta.2 - c.2) - plogis(alpha.16 + beta.2 - c.3),
+           C17_2 = plogis(alpha.17 + beta.2 - c.2) - plogis(alpha.17 + beta.2 - c.3),
+           C18_2 = plogis(alpha.18 + beta.2 - c.2) - plogis(alpha.18 + beta.2 - c.3),
+           C19_2 = plogis(alpha.19 + beta.2 - c.2) - plogis(alpha.19 + beta.2 - c.3),
+           C20_2 = plogis(alpha.20 + beta.2 - c.2) - plogis(alpha.20 + beta.2 - c.3),
+           C21_2 = plogis(alpha.21 + beta.2 - c.2) - plogis(alpha.21 + beta.2 - c.3),
+           C22_2 = plogis(alpha.22 + beta.2 - c.2) - plogis(alpha.22 + beta.2 - c.3),
+           C23_2 = plogis(alpha.23 + beta.2 - c.2) - plogis(alpha.23 + beta.2 - c.3),
+           C24_2 = plogis(alpha.24 + beta.2 - c.2) - plogis(alpha.24 + beta.2 - c.3),
+           C25_2 = plogis(alpha.25 + beta.2 - c.2) - plogis(alpha.25 + beta.2 - c.3),
+           DFW1_1 = plogis(alpha.1 + beta.1 - c.3),
+           DFW2_1 = plogis(alpha.2 + beta.1 - c.3),
+           DFW3_1 = plogis(alpha.3 + beta.1 - c.3),
+           DFW4_1 = plogis(alpha.4 + beta.1 - c.3),
+           DFW5_1 = plogis(alpha.5 + beta.1 - c.3),
+           DFW6_1 = plogis(alpha.6 + beta.1 - c.3),
+           DFW7_1 = plogis(alpha.7 + beta.1 - c.3),
+           DFW8_1 = plogis(alpha.8 + beta.1 - c.3),
+           DFW9_1 = plogis(alpha.9 + beta.1 - c.3),
+           DFW10_1 = plogis(alpha.10 + beta.1 - c.3),
+           DFW11_1 = plogis(alpha.11 + beta.1 - c.3),
+           DFW12_1 = plogis(alpha.12 + beta.1 - c.3),
+           DFW13_1 = plogis(alpha.13 + beta.1 - c.3),
+           DFW14_1 = plogis(alpha.14 + beta.1 - c.3),
+           DFW15_1 = plogis(alpha.15 + beta.1 - c.3),
+           DFW16_1 = plogis(alpha.16 + beta.1 - c.3),
+           DFW17_1 = plogis(alpha.17 + beta.1 - c.3),
+           DFW18_1 = plogis(alpha.18 + beta.1 - c.3),
+           DFW19_1 = plogis(alpha.19 + beta.1 - c.3),
+           DFW20_1 = plogis(alpha.20 + beta.1 - c.3),
+           DFW21_1 = plogis(alpha.21 + beta.1 - c.3),
+           DFW22_1 = plogis(alpha.22 + beta.1 - c.3),
+           DFW23_1 = plogis(alpha.23 + beta.1 - c.3),
+           DFW24_1 = plogis(alpha.24 + beta.1 - c.3),
+           DFW25_1 = plogis(alpha.25 + beta.1 - c.3),
+           DFW1_2 = plogis(alpha.1 + beta.2 - c.3),
+           DFW2_2 = plogis(alpha.2 + beta.2 - c.3),
+           DFW3_2 = plogis(alpha.3 + beta.2 - c.3),
+           DFW4_2 = plogis(alpha.4 + beta.2 - c.3),
+           DFW5_2 = plogis(alpha.5 + beta.2 - c.3),
+           DFW6_2 = plogis(alpha.6 + beta.2 - c.3),
+           DFW7_2 = plogis(alpha.7 + beta.2 - c.3),
+           DFW8_2 = plogis(alpha.8 + beta.2 - c.3),
+           DFW9_2 = plogis(alpha.9 + beta.2 - c.3),
+           DFW10_2 = plogis(alpha.10 + beta.2 - c.3),
+           DFW11_2 = plogis(alpha.11 + beta.2 - c.3),
+           DFW12_2 = plogis(alpha.12 + beta.2 - c.3),
+           DFW13_2 = plogis(alpha.13 + beta.2 - c.3),
+           DFW14_2 = plogis(alpha.14 + beta.2 - c.3),
+           DFW15_2 = plogis(alpha.15 + beta.2 - c.3),
+           DFW16_2 = plogis(alpha.16 + beta.2 - c.3),
+           DFW17_2 = plogis(alpha.17 + beta.2 - c.3),
+           DFW18_2 = plogis(alpha.18 + beta.2 - c.3),
+           DFW19_2 = plogis(alpha.19 + beta.2 - c.3),
+           DFW20_2 = plogis(alpha.20 + beta.2 - c.3),
+           DFW21_2 = plogis(alpha.21 + beta.2 - c.3),
+           DFW22_2 = plogis(alpha.22 + beta.2 - c.3),
+           DFW23_2 = plogis(alpha.23 + beta.2 - c.3),
+           DFW24_2 = plogis(alpha.24 + beta.2 - c.3),
+           DFW25_2 = plogis(alpha.25 + beta.2 - c.3))
+ord_mm_tidyA_12
+```
+
+```{r}
+ord_mm_tidy_diffA_12 <- ord_mm_tidyA_12 %>%
+    transmute(A1_diff = A1_2 - A1_1,
+              A2_diff = A2_2 - A2_1,
+              A3_diff = A3_2 - A3_1,
+              A4_diff = A4_2 - A4_1,
+              A5_diff = A5_2 - A5_1,
+              A6_diff = A6_2 - A6_1,
+              A7_diff = A7_2 - A7_1,
+              A8_diff = A8_2 - A8_1,
+              A9_diff = A9_2 - A9_1,
+              A10_diff = A10_2 - A10_1,
+              A11_diff = A11_2 - A11_1,
+              A12_diff = A12_2 - A12_1,
+              A13_diff = A13_2 - A13_1,
+              A14_diff = A14_2 - A14_1,
+              A15_diff = A15_2 - A15_1,
+              A16_diff = A16_2 - A16_1,
+              A17_diff = A17_2 - A17_1,
+              A18_diff = A18_2 - A18_1,
+              A19_diff = A19_2 - A19_1,
+              A20_diff = A20_2 - A20_1,
+              A21_diff = A21_2 - A21_1,
+              A22_diff = A22_2 - A22_1,
+              A23_diff = A23_2 - A23_1,
+              A24_diff = A24_2 - A24_1,
+              A25_diff = A25_2 - A25_1,
+              B1_diff = B1_2 - B1_1,
+              B2_diff = B2_2 - B2_1,
+              B3_diff = B3_2 - B3_1,
+              B4_diff = B4_2 - B4_1,
+              B5_diff = B5_2 - B5_1,
+              B6_diff = B6_2 - B6_1,
+              B7_diff = B7_2 - B7_1,
+              B8_diff = B8_2 - B8_1,
+              B9_diff = B9_2 - B9_1,
+              B10_diff = B10_2 - B10_1,
+              B11_diff = B11_2 - B11_1,
+              B12_diff = B12_2 - B12_1,
+              B13_diff = B13_2 - B13_1,
+              B14_diff = B14_2 - B14_1,
+              B15_diff = B15_2 - B15_1,
+              B16_diff = B16_2 - B16_1,
+              B17_diff = B17_2 - B17_1,
+              B18_diff = B18_2 - B18_1,
+              B19_diff = B19_2 - B19_1,
+              B20_diff = B20_2 - B20_1,
+              B21_diff = B21_2 - B21_1,
+              B22_diff = B22_2 - B22_1,
+              B23_diff = B23_2 - B23_1,
+              B24_diff = B24_2 - B24_1,
+              B25_diff = B25_2 - B25_1,
+              C1_diff = C1_2 - C1_1,
+              C2_diff = C2_2 - C2_1,
+              C3_diff = C3_2 - C3_1,
+              C4_diff = C4_2 - C4_1,
+              C5_diff = C5_2 - C5_1,
+              C6_diff = C6_2 - C6_1,
+              C7_diff = C7_2 - C7_1,
+              C8_diff = C8_2 - C8_1,
+              C9_diff = C9_2 - C9_1,
+              C10_diff = C10_2 - C10_1,
+              C11_diff = C11_2 - C11_1,
+              C12_diff = C12_2 - C12_1,
+              C13_diff = C13_2 - C13_1,
+              C14_diff = C14_2 - C14_1,
+              C15_diff = C15_2 - C15_1,
+              C16_diff = C16_2 - C16_1,
+              C17_diff = C17_2 - C17_1,
+              C18_diff = C18_2 - C18_1,
+              C19_diff = C19_2 - C19_1,
+              C20_diff = C20_2 - C20_1,
+              C21_diff = C21_2 - C21_1,
+              C22_diff = C22_2 - C22_1,
+              C23_diff = C23_2 - C23_1,
+              C24_diff = C24_2 - C24_1,
+              C25_diff = C25_2 - C25_1,
+              DFW1_diff = DFW1_2 - DFW1_1,
+              DFW2_diff = DFW2_2 - DFW2_1,
+              DFW3_diff = DFW3_2 - DFW3_1,
+              DFW4_diff = DFW4_2 - DFW4_1,
+              DFW5_diff = DFW5_2 - DFW5_1,
+              DFW6_diff = DFW6_2 - DFW6_1,
+              DFW7_diff = DFW7_2 - DFW7_1,
+              DFW8_diff = DFW8_2 - DFW8_1,
+              DFW9_diff = DFW9_2 - DFW9_1,
+              DFW10_diff = DFW10_2 - DFW10_1,
+              DFW11_diff = DFW11_2 - DFW11_1,
+              DFW12_diff = DFW12_2 - DFW12_1,
+              DFW13_diff = DFW13_2 - DFW13_1,
+              DFW14_diff = DFW14_2 - DFW14_1,
+              DFW15_diff = DFW15_2 - DFW15_1,
+              DFW16_diff = DFW16_2 - DFW16_1,
+              DFW17_diff = DFW17_2 - DFW17_1,
+              DFW18_diff = DFW18_2 - DFW18_1,
+              DFW19_diff = DFW19_2 - DFW19_1,
+              DFW20_diff = DFW20_2 - DFW20_1,
+              DFW21_diff = DFW21_2 - DFW21_1,
+              DFW22_diff = DFW22_2 - DFW22_1,
+              DFW23_diff = DFW23_2 - DFW23_1,
+              DFW24_diff = DFW24_2 - DFW24_1,
+              DFW25_diff = DFW25_2 - DFW25_1)
+ord_mm_tidy_diffA_12
+```
+
+```{r}
+ord_mm_long_diffA_12 <- ord_mm_tidy_diffA_12 %>%
+    pivot_longer(cols = starts_with(c("A", "B", "C", "DFW")),
+                 names_to = "grade_diff",
+                 values_to = "prop")
+ord_mm_long_diffA_12
+```
+
+```{r}
+ord_mm_long_diff_groupedA_12 <- ord_mm_long_diffA_12 %>%
+  mutate(grade_diff_grouped = case_when(str_detect(grade_diff, "^A") ~ "A",
+                                        str_detect(grade_diff, "^B") ~ "B",
+                                        str_detect(grade_diff, "^C") ~ "C",
+                                        str_detect(grade_diff, "^DFW") ~ "DFW"))
+ord_mm_long_diff_groupedA_12
+```
+
+```{r}
+ord_mm_long_diff_groupedA_12 %>%
+    ggplot(aes(y = fct_rev(grade_diff_grouped), x = prop)) +
+        stat_halfeye() +
+    geom_vline(xintercept = 0, color = "blue")
+```
+
+### Phase 1 to Phase 3
+
+```{r}
+ord_mm_tidyA_13 <- ord_mm_fitA_13 %>%
+    spread_draws(alpha[..], beta[..], c[..]) %>%
+    mutate(or = exp(beta.1 - beta.2),
+           A1_1 = 1 - plogis(alpha.1 + beta.1 - c.1),
+           A2_1 = 1 - plogis(alpha.2 + beta.1 - c.1),
+           A3_1 = 1 - plogis(alpha.3 + beta.1 - c.1),
+           A4_1 = 1 - plogis(alpha.4 + beta.1 - c.1),
+           A5_1 = 1 - plogis(alpha.5 + beta.1 - c.1),
+           A6_1 = 1 - plogis(alpha.6 + beta.1 - c.1),
+           A7_1 = 1 - plogis(alpha.7 + beta.1 - c.1),
+           A8_1 = 1 - plogis(alpha.8 + beta.1 - c.1),
+           A9_1 = 1 - plogis(alpha.9 + beta.1 - c.1),
+           A10_1 = 1 - plogis(alpha.10 + beta.1 - c.1),
+           A11_1 = 1 - plogis(alpha.11 + beta.1 - c.1),
+           A1_3 = 1 - plogis(alpha.1 + beta.2 - c.1),
+           A2_3 = 1 - plogis(alpha.2 + beta.2 - c.1),
+           A3_3 = 1 - plogis(alpha.3 + beta.2 - c.1),
+           A4_3 = 1 - plogis(alpha.4 + beta.2 - c.1),
+           A5_3 = 1 - plogis(alpha.5 + beta.2 - c.1),
+           A6_3 = 1 - plogis(alpha.6 + beta.2 - c.1),
+           A7_3 = 1 - plogis(alpha.7 + beta.2 - c.1),
+           A8_3 = 1 - plogis(alpha.8 + beta.2 - c.1),
+           A9_3 = 1 - plogis(alpha.9 + beta.2 - c.1),
+           A10_3 = 1 - plogis(alpha.10 + beta.2 - c.1),
+           A11_3 = 1 - plogis(alpha.11 + beta.2 - c.1),
+           B1_1 = plogis(alpha.1 + beta.1 - c.1) - plogis(alpha.1 + beta.1 - c.2),
+           B2_1 = plogis(alpha.2 + beta.1 - c.1) - plogis(alpha.2 + beta.1 - c.2),
+           B3_1 = plogis(alpha.3 + beta.1 - c.1) - plogis(alpha.3 + beta.1 - c.2),
+           B4_1 = plogis(alpha.4 + beta.1 - c.1) - plogis(alpha.4 + beta.1 - c.2),
+           B5_1 = plogis(alpha.5 + beta.1 - c.1) - plogis(alpha.5 + beta.1 - c.2),
+           B6_1 = plogis(alpha.6 + beta.1 - c.1) - plogis(alpha.6 + beta.1 - c.2),
+           B7_1 = plogis(alpha.7 + beta.1 - c.1) - plogis(alpha.7 + beta.1 - c.2),
+           B8_1 = plogis(alpha.8 + beta.1 - c.1) - plogis(alpha.8 + beta.1 - c.2),
+           B9_1 = plogis(alpha.9 + beta.1 - c.1) - plogis(alpha.9 + beta.1 - c.2),
+           B10_1 = plogis(alpha.10 + beta.1 - c.1) - plogis(alpha.10 + beta.1 - c.2),
+           B11_1 = plogis(alpha.11 + beta.1 - c.1) - plogis(alpha.11 + beta.1 - c.2),
+           B1_3 = plogis(alpha.1 + beta.2 - c.1) - plogis(alpha.1 + beta.2 - c.2),
+           B2_3 = plogis(alpha.2 + beta.2 - c.1) - plogis(alpha.2 + beta.2 - c.2),
+           B3_3 = plogis(alpha.3 + beta.2 - c.1) - plogis(alpha.3 + beta.2 - c.2),
+           B4_3 = plogis(alpha.4 + beta.2 - c.1) - plogis(alpha.4 + beta.2 - c.2),
+           B5_3 = plogis(alpha.5 + beta.2 - c.1) - plogis(alpha.5 + beta.2 - c.2),
+           B6_3 = plogis(alpha.6 + beta.2 - c.1) - plogis(alpha.6 + beta.2 - c.2),
+           B7_3 = plogis(alpha.7 + beta.2 - c.1) - plogis(alpha.7 + beta.2 - c.2),
+           B8_3 = plogis(alpha.8 + beta.2 - c.1) - plogis(alpha.8 + beta.2 - c.2),
+           B9_3 = plogis(alpha.9 + beta.2 - c.1) - plogis(alpha.9 + beta.2 - c.2),
+           B10_3 = plogis(alpha.10 + beta.2 - c.1) - plogis(alpha.10 + beta.2 - c.2),
+           B11_3 = plogis(alpha.11 + beta.2 - c.1) - plogis(alpha.11 + beta.2 - c.2),
+           C1_1 = plogis(alpha.1 + beta.1 - c.2) - plogis(alpha.1 + beta.1 - c.3),
+           C2_1 = plogis(alpha.2 + beta.1 - c.2) - plogis(alpha.2 + beta.1 - c.3),
+           C3_1 = plogis(alpha.3 + beta.1 - c.2) - plogis(alpha.3 + beta.1 - c.3),
+           C4_1 = plogis(alpha.4 + beta.1 - c.2) - plogis(alpha.4 + beta.1 - c.3),
+           C5_1 = plogis(alpha.5 + beta.1 - c.2) - plogis(alpha.5 + beta.1 - c.3),
+           C6_1 = plogis(alpha.6 + beta.1 - c.2) - plogis(alpha.6 + beta.1 - c.3),
+           C7_1 = plogis(alpha.7 + beta.1 - c.2) - plogis(alpha.7 + beta.1 - c.3),
+           C8_1 = plogis(alpha.8 + beta.1 - c.2) - plogis(alpha.8 + beta.1 - c.3),
+           C9_1 = plogis(alpha.9 + beta.1 - c.2) - plogis(alpha.9 + beta.1 - c.3),
+           C10_1 = plogis(alpha.10 + beta.1 - c.2) - plogis(alpha.10 + beta.1 - c.3),
+           C11_1 = plogis(alpha.11 + beta.1 - c.2) - plogis(alpha.11 + beta.1 - c.3),
+           C1_3 = plogis(alpha.1 + beta.2 - c.2) - plogis(alpha.1 + beta.2 - c.3),
+           C2_3 = plogis(alpha.2 + beta.2 - c.2) - plogis(alpha.2 + beta.2 - c.3),
+           C3_3 = plogis(alpha.3 + beta.2 - c.2) - plogis(alpha.3 + beta.2 - c.3),
+           C4_3 = plogis(alpha.4 + beta.2 - c.2) - plogis(alpha.4 + beta.2 - c.3),
+           C5_3 = plogis(alpha.5 + beta.2 - c.2) - plogis(alpha.5 + beta.2 - c.3),
+           C6_3 = plogis(alpha.6 + beta.2 - c.2) - plogis(alpha.6 + beta.2 - c.3),
+           C7_3 = plogis(alpha.7 + beta.2 - c.2) - plogis(alpha.7 + beta.2 - c.3),
+           C8_3 = plogis(alpha.8 + beta.2 - c.2) - plogis(alpha.8 + beta.2 - c.3),
+           C9_3 = plogis(alpha.9 + beta.2 - c.2) - plogis(alpha.9 + beta.2 - c.3),
+           C10_3 = plogis(alpha.10 + beta.2 - c.2) - plogis(alpha.10 + beta.2 - c.3),
+           C11_3 = plogis(alpha.11 + beta.2 - c.2) - plogis(alpha.11 + beta.2 - c.3),
+           DFW1_1 = plogis(alpha.1 + beta.1 - c.3),
+           DFW2_1 = plogis(alpha.2 + beta.1 - c.3),
+           DFW3_1 = plogis(alpha.3 + beta.1 - c.3),
+           DFW4_1 = plogis(alpha.4 + beta.1 - c.3),
+           DFW5_1 = plogis(alpha.5 + beta.1 - c.3),
+           DFW6_1 = plogis(alpha.6 + beta.1 - c.3),
+           DFW7_1 = plogis(alpha.7 + beta.1 - c.3),
+           DFW8_1 = plogis(alpha.8 + beta.1 - c.3),
+           DFW9_1 = plogis(alpha.9 + beta.1 - c.3),
+           DFW10_1 = plogis(alpha.10 + beta.1 - c.3),
+           DFW11_1 = plogis(alpha.11 + beta.1 - c.3),
+           DFW1_3 = plogis(alpha.1 + beta.2 - c.3),
+           DFW2_3 = plogis(alpha.2 + beta.2 - c.3),
+           DFW3_3 = plogis(alpha.3 + beta.2 - c.3),
+           DFW4_3 = plogis(alpha.4 + beta.2 - c.3),
+           DFW5_3 = plogis(alpha.5 + beta.2 - c.3),
+           DFW6_3 = plogis(alpha.6 + beta.2 - c.3),
+           DFW7_3 = plogis(alpha.7 + beta.2 - c.3),
+           DFW8_3 = plogis(alpha.8 + beta.2 - c.3),
+           DFW9_3 = plogis(alpha.9 + beta.2 - c.3),
+           DFW10_3 = plogis(alpha.10 + beta.2 - c.3),
+           DFW11_3 = plogis(alpha.11 + beta.2 - c.3))
+ord_mm_tidyA_13
+```
+
+```{r}
+ord_mm_tidy_diffA_13 <- ord_mm_tidyA_13 %>%
+    transmute(A1_diff = A1_3 - A1_1,
+              A2_diff = A2_3 - A2_1,
+              A3_diff = A3_3 - A3_1,
+              A4_diff = A4_3 - A4_1,
+              A5_diff = A5_3 - A5_1,
+              A6_diff = A6_3 - A6_1,
+              A7_diff = A7_3 - A7_1,
+              A8_diff = A8_3 - A8_1,
+              A9_diff = A9_3 - A9_1,
+              A10_diff = A10_3 - A10_1,
+              A11_diff = A11_3 - A11_1,
+              B1_diff = B1_3 - B1_1,
+              B2_diff = B2_3 - B2_1,
+              B3_diff = B3_3 - B3_1,
+              B4_diff = B4_3 - B4_1,
+              B5_diff = B5_3 - B5_1,
+              B6_diff = B6_3 - B6_1,
+              B7_diff = B7_3 - B7_1,
+              B8_diff = B8_3 - B8_1,
+              B9_diff = B9_3 - B9_1,
+              B10_diff = B10_3 - B10_1,
+              B11_diff = B11_3 - B11_1,
+              C1_diff = C1_3 - C1_1,
+              C2_diff = C2_3 - C2_1,
+              C3_diff = C3_3 - C3_1,
+              C4_diff = C4_3 - C4_1,
+              C5_diff = C5_3 - C5_1,
+              C6_diff = C6_3 - C6_1,
+              C7_diff = C7_3 - C7_1,
+              C8_diff = C8_3 - C8_1,
+              C9_diff = C9_3 - C9_1,
+              C10_diff = C10_3 - C10_1,
+              C11_diff = C11_3 - C11_1,
+              DFW1_diff = DFW1_3 - DFW1_1,
+              DFW2_diff = DFW2_3 - DFW2_1,
+              DFW3_diff = DFW3_3 - DFW3_1,
+              DFW4_diff = DFW4_3 - DFW4_1,
+              DFW5_diff = DFW5_3 - DFW5_1,
+              DFW6_diff = DFW6_3 - DFW6_1,
+              DFW7_diff = DFW7_3 - DFW7_1,
+              DFW8_diff = DFW8_3 - DFW8_1,
+              DFW9_diff = DFW9_3 - DFW9_1,
+              DFW10_diff = DFW10_3 - DFW10_1,
+              DFW11_diff = DFW11_3 - DFW11_1)
+ord_mm_tidy_diffA_13
+```
+
+```{r}
+ord_mm_long_diffA_13 <- ord_mm_tidy_diffA_13 %>%
+    pivot_longer(cols = starts_with(c("A", "B", "C", "DFW")),
+                 names_to = "grade_diff",
+                 values_to = "prop")
+ord_mm_long_diffA_13
+```
+
+```{r}
+ord_mm_long_diff_groupedA_13 <- ord_mm_long_diffA_13 %>%
+  mutate(grade_diff_grouped = case_when(str_detect(grade_diff, "^A") ~ "A",
+                                        str_detect(grade_diff, "^B") ~ "B",
+                                        str_detect(grade_diff, "^C") ~ "C",
+                                        str_detect(grade_diff, "^DFW") ~ "DFW"))
+ord_mm_long_diff_groupedA_13
+```
+
+```{r}
+ord_mm_long_diff_groupedA_13 %>%
+    ggplot(aes(y = fct_rev(grade_diff_grouped), x = prop)) +
+        stat_halfeye() +
+    geom_vline(xintercept = 0, color = "blue")
+```
+
+
+## Graphs for publication
+
+Set theme for smaller graphs:
+
+```{r}
+pub_theme_A = theme(text = element_text(size = 14),
+                    plot.title = element_text(size = 16))
+pub_theme_B = theme(text = element_text(size = 11),
+                    plot.title = element_text(size = 14),
+                    plot.subtitle = element_text(size = 11))
+```
+
+
+### Grades
+
+#### Phase 1 to Phase 2
+
+Shows faculty with only Phase 1 and Phase 2 data.
+
+```{r, fig.width = 8}
+d_all %>%
+    filter(phase_coll == 1 | phase_coll == 2) %>%
+    filter(faculty_ind > 11) %>%
+    group_by(phase, faculty_ind, grade) %>%
+    count() %>%
+    group_by(phase, faculty_ind) %>%
+    mutate(prop = n/sum(n)) %>%
+    ggplot(aes(x = grade, y = prop)) +
+        geom_bar(stat = "identity") +
+        facet_grid(phase ~ faculty_ind )+
+        labs(x = "Grade",
+             y = "Proportion")
+```
+
+```{r}
+ggsave("./graphics/phase12_all_grades.pdf", device = "pdf", width = 8, height = 3)
+```
+
+#### Phase 1 to Phase 3
+
+Shows faculty with all three phases.
+
+```{r, fig.width = 8}
+d_all %>%
+    filter(faculty_ind <= 11) %>%
+    group_by(phase, faculty_ind, grade) %>%
+    count() %>%
+    group_by(phase, faculty_ind) %>%
+    mutate(prop = n/sum(n)) %>%
+    ggplot(aes(x = grade, y = prop)) +
+        geom_bar(stat = "identity") +
+        facet_grid(phase ~ faculty_ind )+
+        labs(x = "Grade",
+             y = "Proportion")
+```
+
+```{r}
+ggsave("./graphics/phase123_all_grades.pdf", device = "pdf", width = 8, height = 5)
+```
+
+### Odds ratios
+
+#### Model A
+
+```{r}
+orA_12_post <- ggplot(ord_mm_tidyA_12, aes(x = or)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         title = "Model A",
+         subtitle = "Phase 1 to Phase 2") +
+    pub_theme_A
+orA_12_post
+```
+
+```{r}
+orA_13_post <- ggplot(ord_mm_tidyA_13, aes(x = or)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         subtitle = "Phase 1 to Phase 3") +
+    pub_theme_A
+orA_13_post
+```
+
+```{r, fig.width = 8}
+orA_12_post + orA_13_post
+```
+
+```{r}
+ggsave("./graphics/orA_post.pdf", device = "pdf", width = 8, height = 3)
+```
+
+#### Model B
+
+##### Phase 1 to Phase 2
+
+```{r}
+orB_12_men_BHI_post <- ggplot(ord_mm_tidyB_12, aes(x = or_men_BHI)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         title = "Model B, Phase 1 to Phase 2",
+         subtitle = "Men: Black, Hispanic, or Indigenous") +
+    pub_theme_B
+orB_12_men_BHI_post
+```
+
+```{r}
+orB_12_women_BHI_post <- ggplot(ord_mm_tidyB_12, aes(x = or_women_BHI)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         subtitle = "Women: Black, Hispanic, or Indigenous") +
+    pub_theme_B
+orB_12_women_BHI_post
+```
+
+```{r}
+orB_12_men_WA_post <- ggplot(ord_mm_tidyB_12, aes(x = or_men_WA)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         subtitle = "Men: White or Asian") +
+    pub_theme_B
+orB_12_men_WA_post
+```
+
+```{r}
+orB_12_women_WA_post <- ggplot(ord_mm_tidyB_12, aes(x = or_women_WA)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         subtitle = "Women: White or Asian") +
+    pub_theme_B
+orB_12_women_WA_post
+```
+
+```{r}
+(orB_12_men_BHI_post | orB_12_women_BHI_post) / (orB_12_men_WA_post | orB_12_women_WA_post)
+```
+
+```{r}
+ggsave("./graphics/orB_12_post.pdf", device = "pdf", width = 8, height = 5)
+```
+
+##### Phase 1 to Phase 3
+
+```{r}
+orB_13_men_BHI_post <- ggplot(ord_mm_tidyB_13, aes(x = or_men_BHI)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         title = "Model B, Phase 1 to Phase 3",
+         subtitle = "Men: Black, Hispanic, or Indigenous") +
+    pub_theme_B
+orB_13_men_BHI_post
+```
+
+```{r}
+orB_13_women_BHI_post <- ggplot(ord_mm_tidyB_13, aes(x = or_women_BHI)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         subtitle = "Women: Black, Hispanic, or Indigenous") +
+    pub_theme_B
+orB_13_women_BHI_post
+```
+
+```{r}
+orB_13_men_WA_post <- ggplot(ord_mm_tidyB_13, aes(x = or_men_WA)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         subtitle = "Men: White or Asian") +
+    pub_theme_B
+orB_13_men_WA_post
+```
+
+```{r}
+orB_13_women_WA_post <- ggplot(ord_mm_tidyB_13, aes(x = or_women_WA)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    geom_vline(xintercept = 1, color = "blue") +
+    labs(x = "Odds ratio",
+         y = "Probability density",
+         subtitle = "Women: White or Asian") +
+    pub_theme_B
+orB_13_women_WA_post
+```
+
+```{r}
+(orB_13_men_BHI_post | orB_13_women_BHI_post) / (orB_13_men_WA_post | orB_13_women_WA_post)
+```
+
+```{r}
+ggsave("./graphics/orB_13_post.pdf", device = "pdf", width = 8, height = 5)
+```
+
+### Faculy differences
+
+Only for Model A.
+
+```{r}
+prop_change12 <- ord_mm_long_diff_groupedA_12 %>%
+    ggplot(aes(y = fct_rev(grade_diff_grouped), x = prop)) +
+        stat_halfeye() +
+    geom_vline(xintercept = 0, color = "blue") +
+    labs(x = "Proportion change",
+         y = "Grade",
+         title = "Model A",
+         subtitle = "Phase 1 to Phase 2") +
+    pub_theme
+prop_change12
+```
+
+```{r}
+prop_change13 <- ord_mm_long_diff_groupedA_13 %>%
+    ggplot(aes(y = fct_rev(grade_diff_grouped), x = prop)) +
+        stat_halfeye() +
+    geom_vline(xintercept = 0, color = "blue") +
+    labs(x = "Proportion change",
+         y = "Grade",
+         subtitle = "Phase 1 to Phase 3") +
+    pub_theme
+prop_change13
+```
+
+```{r}
+prop_change12 + prop_change13
+```
+
+```{r}
+ggsave("./graphics/prop_change.pdf", device = "pdf", width = 8, height = 4)
+```
